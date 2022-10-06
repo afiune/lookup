@@ -1,4 +1,4 @@
 lookup - Lacework CDK Component
 ====
 
-Example of a component for the Lacework CLI that does security lookups.
+Example of a component using Lacework SDK's that does security lookups.

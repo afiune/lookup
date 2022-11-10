@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lacework/go-sdk/api"
+	"github.com/lacework/go-sdk/lwlogger"
 )
 
 func help() {
@@ -17,11 +18,20 @@ func help() {
 }
 
 func main() {
-	lacework, err := api.NewClient(
-		os.Getenv("LW_ACCOUNT"),
-		api.WithApiV2(),
+	log := lwlogger.New("").Sugar()
+
+	// Ping CDK Server
+	if err := PingCDK(log); err != nil {
+		fmt.Println("There was a problem connecting to the CDK server")
+		fmt.Println(err.Error())
+		os.Exit(1)
+	}
+
+	lacework, err := api.NewClient(os.Getenv("LW_ACCOUNT"),
 		api.WithSubaccount(os.Getenv("LW_SUBACCOUNT")),
 		api.WithApiKeys(os.Getenv("LW_API_KEY"), os.Getenv("LW_API_SECRET")),
+		api.WithToken(os.Getenv("LW_API_TOKEN")),
+		api.WithApiV2(),
 	)
 	if err != nil {
 		fmt.Println("One or more missing configuration.")

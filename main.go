@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,37 +10,89 @@ import (
 	"time"
 
 	"github.com/lacework/go-sdk/api"
+	cdk "github.com/lacework/go-sdk/cli/cdk/go/proto/v1"
+	"github.com/lacework/go-sdk/lwlogger"
+	"github.com/pkg/errors"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
-func help() {
-	fmt.Println("Use lookup command to search for entities in your environment. Try the argument 'user:root'.")
-	os.Exit(1)
+func main() {
+	if err := lookup(); err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR %s\n", err)
+		os.Exit(1)
+	}
 }
 
-func main() {
-	lacework, err := api.NewClient(
-		os.Getenv("LW_ACCOUNT"),
-		api.WithApiV2(),
+func help() error {
+	fmt.Println("Use lookup command to search for entities in your environment. Try the argument 'user:root'.")
+	return nil
+}
+
+func lookup() error {
+	log := lwlogger.New("").Sugar()
+
+	// Set up a connection to the CDK server
+	log.Infow("connecting to gRPC server", "address", os.Getenv("LW_CDK_TARGET"))
+	conn, err := grpc.Dial(os.Getenv("LW_CDK_TARGET"),
+		// @afiune we do an insecure connection since we are
+		// connecting to the server running on the same machine
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return errors.Wrap(err, "could not connect")
+	}
+	defer conn.Close()
+
+	var (
+		cdkClient   = cdk.NewCoreClient(conn)
+		ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	)
+	defer cancel()
+
+	// Ping the CDK Server
+	reply, err := cdkClient.Ping(ctx, &cdk.PingRequest{
+		ComponentName: os.Getenv("LW_COMPONENT_NAME"),
+	})
+	if err != nil {
+		return errors.Wrap(err, "could not ping")
+	}
+	log.Debugw("response", "from", "cdk.v1.Core/Ping", "message", reply.GetMessage())
+
+	lacework, err := api.NewClient(os.Getenv("LW_ACCOUNT"),
 		api.WithSubaccount(os.Getenv("LW_SUBACCOUNT")),
 		api.WithApiKeys(os.Getenv("LW_API_KEY"), os.Getenv("LW_API_SECRET")),
+		api.WithToken(os.Getenv("LW_API_TOKEN")),
+		api.WithApiV2(),
 	)
 	if err != nil {
-		fmt.Println("One or more missing configuration.")
-		os.Exit(1)
+		return errors.Wrap(err, "One or more missing configuration")
 	}
 
 	if len(os.Args) <= 1 {
-		help()
+		return help()
 	}
 
 	kv := strings.Split(os.Args[1], ":")
 	if len(kv) != 2 {
-		help()
+		return help()
 	}
 
 	// Search always in the past day
 	now := time.Now().UTC()
 	before := now.AddDate(0, 0, -1) // 1 day from ago
+
+	defer func() {
+		_, err := cdkClient.Honeyvent(context.Background(), &cdk.HoneyventRequest{
+			DurationMs: time.Since(now).Milliseconds(),
+			Feature:    "lookup_event",
+			FeatureData: map[string]string{
+				"search": kv[0],
+			},
+		})
+		if err != nil {
+			log.Error("unable to send honeyvent", "error", err)
+		}
+	}()
 
 	switch kv[0] {
 	case "user":
@@ -58,8 +111,7 @@ func main() {
 			},
 		)
 		if err != nil {
-			fmt.Println("\nUnable to load entity. Error: %s", err.Error())
-			os.Exit(1)
+			return errors.Wrap(err, "Unable to load entity")
 		}
 
 		if len(response.Data) == 0 {
@@ -93,8 +145,7 @@ func main() {
 			},
 		)
 		if err != nil {
-			fmt.Println("\nUnable to load entity. Error: %s", err.Error())
-			os.Exit(1)
+			return errors.Wrap(err, "Unable to load entity")
 		}
 
 		if len(response.Data) == 0 {
@@ -105,16 +156,17 @@ func main() {
 		fmt.Println("Machine Information:")
 		jsonOut, err := PrettyStruct(response.Data[0])
 		if err != nil {
-			fmt.Println("\nUnable to output JSON. Error: %s", err.Error())
-			os.Exit(1)
+			return errors.Wrap(err, "Unable to output JSON")
 		}
 
 		fmt.Println(jsonOut)
 	case "image":
-		fmt.Printf("'image' lookup not yet implemented.")
+		return errors.New("'image' lookup not yet implemented.")
 	default:
-		fmt.Printf("Unsupported entity. Try one of user, machine, image.")
+		return errors.New("Unsupported entity. Try one of user, machine, image.")
 	}
+
+	return nil
 }
 
 func contains(s []int, e int) bool {
